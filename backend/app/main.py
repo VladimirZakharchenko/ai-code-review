@@ -1,10 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from openai import AsyncOpenAI
 from pyflakes.api import check as pyflakes_check
 from pyflakes.reporter import Reporter
 from mypy import api as mypy_api
+import httpx
 import os
 import ast
 import io
@@ -27,36 +27,41 @@ class AnalyzeResponse(BaseModel):
     message: str
 
 
-_openai_client: AsyncOpenAI | None = None
+async def _call_genapi(system_prompt: str, user_prompt: str) -> str:
+    api_url = os.getenv("GEN_API_URL")
+    api_key = os.getenv("GEN_API_KEY")
+    if not api_url or not api_key:
+        raise RuntimeError("GEN_API_URL or GEN_API_KEY is not set")
 
+    model_name = os.getenv("GEN_API_MODEL") or "gpt-4-1"
 
-def _get_openai_client() -> AsyncOpenAI:
-    """
-    Клиент LLM с поддержкой двух провайдеров:
-    - GenAPI (через GEN_API_KEY и GEN_API_BASE_URL, например GPT-4.1 от GenAPI);
-    - прямой OpenAI (через OPENAI_API_KEY), если GenAPI не сконфигурирован.
-    """
-    global _openai_client
-    if _openai_client is not None:
-        return _openai_client
+    payload = {
+        "model": model_name,
+        "is_sync": True,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "response_format": {"type": "text"},
+    }
 
-    gen_api_key = os.getenv("GEN_API_KEY")
-    gen_api_base_url = os.getenv("GEN_API_BASE_URL")
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
 
-    if gen_api_key and gen_api_base_url:
-        _openai_client = AsyncOpenAI(
-            api_key=gen_api_key,
-            base_url=gen_api_base_url,
-        )
-        return _openai_client
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(api_url, json=payload, headers=headers)
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "OPENAI_API_KEY is not set and GEN_API_KEY/GEN_API_BASE_URL are not configured"
-        )
-    _openai_client = AsyncOpenAI(api_key=api_key)
-    return _openai_client
+    if resp.status_code != 200:
+        raise RuntimeError(f"GenAPI error {resp.status_code}: {resp.text}")
+
+    data = resp.json()
+    # Пытаемся извлечь ответ в формате, аналогичном OpenAI Chat Completions
+    try:
+        return data["choices"][0]["message"]["content"]
+    except Exception:
+        return str(data)
 
 
 def _local_code_analysis(code: str, language: str | None, filename: str | None) -> str:
@@ -293,13 +298,9 @@ async def analyze_code(payload: AnalyzeRequest) -> AnalyzeResponse:
     lines = len(code.splitlines()) if code else 0
     characters = len(code)
 
-    # Вызов LLM-провайдера (OpenAI / GenAPI) для анализа кода
+    # Вызов GenAPI для анализа кода
     model_message = ""
     try:
-        client = _get_openai_client()
-        # Модель можно переопределить через GEN_API_MODEL (для GenAPI)
-        # или другую переменную окружения, иначе используется дефолт.
-        model_name = os.getenv("GEN_API_MODEL") or "gpt-4.1-mini"
         system_prompt = (
             "Ты помощник для code review. "
             "Кратко оцени код, укажи потенциальные проблемы, читаемость и идеи улучшения. "
@@ -312,15 +313,7 @@ async def analyze_code(payload: AnalyzeRequest) -> AnalyzeResponse:
             f"Код:\n```{payload.language or ''}\n{code}\n```"
         )
 
-        completion = await client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_tokens=400,
-        )
-        model_message = completion.choices[0].message.content or ""
+        model_message = await _call_genapi(system_prompt, user_prompt)
     except Exception as exc:
         # Если провайдер LLM недоступен, выполняем самописный локальный анализ
         local_report = _local_code_analysis(code, payload.language, payload.filename)
