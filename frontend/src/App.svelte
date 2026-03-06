@@ -8,6 +8,7 @@
   let loading = false;
   let error = "";
   let result = null;
+  let displayMessage = "";
 
   const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -30,6 +31,22 @@
       }
 
       result = await res.json();
+
+      const fullMessage = result?.message ?? "";
+      const openAiErrorPrefix = "Не удалось выполнить запрос к модели OpenAI";
+      const localMarker = "Выполнен локальный анализ кода:";
+
+      if (fullMessage.startsWith(openAiErrorPrefix)) {
+        console.warn(fullMessage);
+        const idx = fullMessage.indexOf(localMarker);
+        if (idx !== -1) {
+          displayMessage = fullMessage.slice(idx + localMarker.length).trim();
+        } else {
+          displayMessage = fullMessage;
+        }
+      } else {
+        displayMessage = fullMessage;
+      }
     } catch (e) {
       error = e?.message ?? "Неизвестная ошибка";
     } finally {
@@ -83,7 +100,7 @@
         <li><strong>Строк:</strong> {result.lines}</li>
         <li><strong>Символов:</strong> {result.characters}</li>
       </ul>
-      <p>{result.message}</p>
+      <p>{displayMessage}</p>
     </section>
   {/if}
 </main>
