@@ -293,10 +293,13 @@ async def analyze_code(payload: AnalyzeRequest) -> AnalyzeResponse:
     lines = len(code.splitlines()) if code else 0
     characters = len(code)
 
-    # Вызов OpenAI для анализа кода
+    # Вызов LLM-провайдера (OpenAI / GenAPI) для анализа кода
     model_message = ""
     try:
         client = _get_openai_client()
+        # Модель можно переопределить через GEN_API_MODEL (для GenAPI)
+        # или другую переменную окружения, иначе используется дефолт.
+        model_name = os.getenv("GEN_API_MODEL") or "gpt-4.1-mini"
         system_prompt = (
             "Ты помощник для code review. "
             "Кратко оцени код, укажи потенциальные проблемы, читаемость и идеи улучшения. "
@@ -310,7 +313,7 @@ async def analyze_code(payload: AnalyzeRequest) -> AnalyzeResponse:
         )
 
         completion = await client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model=model_name,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -319,7 +322,7 @@ async def analyze_code(payload: AnalyzeRequest) -> AnalyzeResponse:
         )
         model_message = completion.choices[0].message.content or ""
     except Exception as exc:
-        # Если модель недоступна, выполняем самописный локальный анализ
+        # Если провайдер LLM недоступен, выполняем самописный локальный анализ
         local_report = _local_code_analysis(code, payload.language, payload.filename)
         model_message = (
             "Не удалось выполнить запрос к модели OpenAI ("
